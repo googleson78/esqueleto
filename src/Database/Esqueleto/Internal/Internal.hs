@@ -2188,6 +2188,44 @@ veryUnsafeCoerceSqlExprValueList EEmptyList = throw (UnexpectedCaseErr EmptySqlE
 
 -- | (Internal) Execute an @esqueleto@ @SELECT@ 'SqlQuery' inside
 -- @persistent@'s 'SqlPersistT' monad.
+rawUnionSource :: ( SqlSelect a r
+                   , MonadIO m1
+                   , MonadIO m2
+                   )
+                 => SqlQuery a
+                 -> SqlQuery a
+                 -> SqlReadT m1 (Acquire (C.ConduitT () r m2 ()))
+rawUnionSource leftQuery rightQuery =
+      do
+        conn <- projectBackend <$> R.ask
+        let _ = conn :: SqlBackend
+        res <- R.withReaderT (const conn) (run conn)
+        return $ (C..| massage) `fmap` res
+    where
+
+      run conn =
+        uncurry rawQueryRes $
+        first builderToText $
+        ( "(" <> leftQueryBuilder <> ")"
+              <> "\n UNION\n" <>
+          "(" <> rightQueryBuilder <> ")"
+        , leftQueryValues <> rightQueryValues
+        )
+       where 
+            (leftQueryBuilder, leftQueryValues, identState) = toRawSqlWithFinalIdentState SELECT (conn, initialIdentState) leftQuery 
+            (rightQueryBuilder, rightQueryValues) = toRawSql SELECT (conn, identState) rightQuery 
+
+      massage = do
+        mrow <- C.await
+        case process <$> mrow of
+          Just (Right r)  -> C.yield r >> massage
+          Just (Left err) -> liftIO $ throwIO $ PersistMarshalError err
+          Nothing         -> return ()
+
+      process = sqlSelectProcessRow
+
+-- | (Internal) Execute an @esqueleto@ @SELECT@ 'SqlQuery' inside
+-- @persistent@'s 'SqlPersistT' monad.
 rawSelectSource :: ( SqlSelect a r
                    , MonadIO m1
                    , MonadIO m2
@@ -2283,6 +2321,16 @@ select query = do
     res <- rawSelectSource SELECT query
     conn <- R.ask
     liftIO $ with res $ flip R.runReaderT conn . runSource
+
+union :: ( SqlSelect a r
+         , MonadIO m
+	     )
+      => SqlQuery a -> SqlQuery a -> SqlReadT m [r]
+union leftQuery rightQuery = do
+    res <- rawUnionSource leftQuery rightQuery 
+    conn <- R.ask
+    liftIO $ with res $ flip R.runReaderT conn . runSource
+	
 
 -- | (Internal) Run a 'C.Source' of rows.
 runSource :: Monad m =>
@@ -2391,7 +2439,13 @@ builderToText = TL.toStrict . TLB.toLazyTextWith defaultChunkSize
 toRawSql
   :: (SqlSelect a r, BackendCompatible SqlBackend backend)
   => Mode -> (backend, IdentState) -> SqlQuery a -> (TLB.Builder, [PersistValue])
-toRawSql mode (conn, firstIdentState) query =
+toRawSql mode (conn, firstIdentState) query =  (builder, values)
+    where (builder, values, _) = toRawSqlWithFinalIdentState mode (conn, firstIdentState) query 
+
+toRawSqlWithFinalIdentState 
+  :: (SqlSelect a r, BackendCompatible SqlBackend backend)
+  => Mode -> (backend, IdentState) -> SqlQuery a -> (TLB.Builder, [PersistValue], IdentState)
+toRawSqlWithFinalIdentState mode (conn, firstIdentState) query =
   let ((ret, sd), finalIdentState) =
         flip S.runState firstIdentState $
         W.runWriterT $
@@ -2410,18 +2464,19 @@ toRawSql mode (conn, firstIdentState) query =
       -- that no name clashes will occur on subqueries that may
       -- appear on the expressions below.
       info = (projectBackend conn, finalIdentState)
-  in mconcat
-      [ makeInsertInto info mode ret
-      , makeSelect     info mode distinctClause ret
-      , makeFrom       info mode fromClauses
-      , makeSet        info setClauses
-      , makeWhere      info whereClauses
-      , makeGroupBy    info groupByClause
-      , makeHaving     info havingClause
-      , makeOrderBy    info orderByClauses
-      , makeLimit      info limitClause orderByClauses
-      , makeLocking         lockingClause
-      ]
+      (builder, values) = mconcat
+              [ makeInsertInto info mode ret
+              , makeSelect     info mode distinctClause ret
+              , makeFrom       info mode fromClauses
+              , makeSet        info setClauses
+              , makeWhere      info whereClauses
+              , makeGroupBy    info groupByClause
+              , makeHaving     info havingClause
+              , makeOrderBy    info orderByClauses
+              , makeLimit      info limitClause orderByClauses
+              , makeLocking         lockingClause
+              ]
+    in (builder, values, finalIdentState)
 
 -- | Renders a 'SqlQuery' into a 'Text' value along with the list of
 -- 'PersistValue's that would be supplied to the database for @?@ placeholders.
