@@ -2186,16 +2186,16 @@ veryUnsafeCoerceSqlExprValueList EEmptyList = throw (UnexpectedCaseErr EmptySqlE
 
 ----------------------------------------------------------------------
 
+
 -- | (Internal) Execute an @esqueleto@ @SELECT@ 'SqlQuery' inside
 -- @persistent@'s 'SqlPersistT' monad.
-rawUnionSource :: ( SqlSelect a r
-                   , MonadIO m1
-                   , MonadIO m2
-                   )
-                 => SqlQuery a
-                 -> SqlQuery a
-                 -> SqlReadT m1 (Acquire (C.ConduitT () r m2 ()))
-rawUnionSource leftQuery rightQuery =
+rawBaseSelectSource :: ( SqlSelect a r
+                       , MonadIO m1
+                       , MonadIO m2
+                       )
+                    => (SqlBackend -> (TLB.Builder, [PersistValue]))
+                    -> SqlReadT m1 (Acquire (C.ConduitT () r m2 ()))
+rawBaseSelectSource runSql =
       do
         conn <- projectBackend <$> R.ask
         let _ = conn :: SqlBackend
@@ -2206,14 +2206,7 @@ rawUnionSource leftQuery rightQuery =
       run conn =
         uncurry rawQueryRes $
         first builderToText $
-        ( "(" <> leftQueryBuilder <> ")"
-              <> "\n UNION\n" <>
-          "(" <> rightQueryBuilder <> ")"
-        , leftQueryValues <> rightQueryValues
-        )
-       where 
-            (leftQueryBuilder, leftQueryValues, identState) = toRawSqlWithFinalIdentState SELECT (conn, initialIdentState) leftQuery 
-            (rightQueryBuilder, rightQueryValues) = toRawSql SELECT (conn, identState) rightQuery 
+        runSql conn
 
       massage = do
         mrow <- C.await
@@ -2223,6 +2216,44 @@ rawUnionSource leftQuery rightQuery =
           Nothing         -> return ()
 
       process = sqlSelectProcessRow
+
+data SqlSetOperation 
+    = SqlSetUnion
+    | SqlSetUnionAll
+    | SqlSetIntersect
+    | SqlSetExcept
+
+sqlSetOperationToRawSql :: SqlSetOperation -> TLB.Builder
+sqlSetOperationToRawSql sqlSetOperation =
+    case sqlSetOperation of
+        SqlSetUnion -> "UNION"
+        SqlSetUnionAll -> "UNION ALL"
+        SqlSetIntersect -> "INTERSECT"
+        SqlSetExcept -> "EXCEPT"
+
+-- | (Internal) Execute an @esqueleto@ @SELECT@ 'SqlQuery' inside
+-- @persistent@'s 'SqlPersistT' monad.
+rawSetOperationSource :: ( SqlSelect a r
+                         , SqlSelect b r
+                         , MonadIO m1
+                         , MonadIO m2
+                         )
+                 => SqlSetOperation 
+		         -> SqlQuery a
+                 -> SqlQuery b
+                 -> SqlReadT m1 (Acquire (C.ConduitT () r m2 ()))
+rawSetOperationSource sqlSetOperation leftQuery rightQuery = rawBaseSelectSource runUnion
+   where 
+    runUnion conn =
+        (     leftQueryBuilder
+              <> "\n " <> sqlSetOperationToRawSql sqlSetOperation <> " \n" 
+              <> rightQueryBuilder
+        , leftQueryValues <> rightQueryValues
+        )
+      where
+        (leftQueryBuilder, leftQueryValues, identState) = toRawSqlWithFinalIdentState SELECT (conn, initialIdentState) leftQuery 
+        (rightQueryBuilder, rightQueryValues) = toRawSql SELECT (conn, identState) rightQuery 
+
 
 -- | (Internal) Execute an @esqueleto@ @SELECT@ 'SqlQuery' inside
 -- @persistent@'s 'SqlPersistT' monad.
@@ -2233,27 +2264,8 @@ rawSelectSource :: ( SqlSelect a r
                  => Mode
                  -> SqlQuery a
                  -> SqlReadT m1 (Acquire (C.ConduitT () r m2 ()))
-rawSelectSource mode query =
-      do
-        conn <- projectBackend <$> R.ask
-        let _ = conn :: SqlBackend
-        res <- R.withReaderT (const conn) (run conn)
-        return $ (C..| massage) `fmap` res
-    where
-
-      run conn =
-        uncurry rawQueryRes $
-        first builderToText $
-        toRawSql mode (conn, initialIdentState) query
-
-      massage = do
-        mrow <- C.await
-        case process <$> mrow of
-          Just (Right r)  -> C.yield r >> massage
-          Just (Left err) -> liftIO $ throwIO $ PersistMarshalError err
-          Nothing         -> return ()
-
-      process = sqlSelectProcessRow
+rawSelectSource mode query = rawBaseSelectSource $ \conn ->
+    toRawSql mode (conn, initialIdentState) query
 
 
 -- | Execute an @esqueleto@ @SELECT@ query inside @persistent@'s
@@ -2268,6 +2280,23 @@ selectSource :: ( SqlSelect a r
              -> C.ConduitT () r (R.ReaderT backend m) ()
 selectSource query = do
   res <- lift $ rawSelectSource SELECT query
+  (key, src) <- lift $ allocateAcquire res
+  src
+  lift $ release key
+
+-- | Execute an @esqueleto@ @SELECT@ union query inside @persistent@'s
+-- 'SqlPersistT' monad and return a 'C.Source' of rows.
+unionSource :: ( SqlSelect a r
+               , BackendCompatible SqlBackend backend
+               , IsPersistBackend backend
+               , PersistQueryRead backend
+               , PersistStoreRead backend, PersistUniqueRead backend
+               , MonadResource m )
+             => SqlQuery a
+             -> SqlQuery a
+             -> C.ConduitT () r (R.ReaderT backend m) ()
+unionSource leftQuery rightQuery = do
+  res <- lift $ rawSetOperationSource SqlSetUnion leftQuery rightQuery
   (key, src) <- lift $ allocateAcquire res
   src
   lift $ release key
@@ -2322,14 +2351,46 @@ select query = do
     conn <- R.ask
     liftIO $ with res $ flip R.runReaderT conn . runSource
 
-union :: ( SqlSelect a r
-         , MonadIO m
-	     )
-      => SqlQuery a -> SqlQuery a -> SqlReadT m [r]
-union leftQuery rightQuery = do
-    res <- rawUnionSource leftQuery rightQuery 
+doSetOperation :: ( SqlSelect a r
+                  , SqlSelect b r
+                  , MonadIO m
+                  )
+               => SqlSetOperation 
+               -> SqlQuery a 
+               -> SqlQuery b
+               -> SqlReadT m [r]
+doSetOperation sqlSetOperation leftQuery rightQuery = do
+    res <- rawSetOperationSource sqlSetOperation leftQuery rightQuery 
     conn <- R.ask
     liftIO $ with res $ flip R.runReaderT conn . runSource
+
+union :: ( SqlSelect a r
+         , SqlSelect b r
+         , MonadIO m
+	     )
+      => SqlQuery a -> SqlQuery b -> SqlReadT m [r]
+union = doSetOperation SqlSetUnion
+
+unionAll :: ( SqlSelect a r
+            , SqlSelect b r
+            , MonadIO m
+            )
+         => SqlQuery a -> SqlQuery b -> SqlReadT m [r]
+unionAll = doSetOperation SqlSetUnionAll
+
+intersect :: ( SqlSelect a r
+             , SqlSelect b r
+             , MonadIO m
+             )
+          => SqlQuery a -> SqlQuery b -> SqlReadT m [r]
+intersect = doSetOperation SqlSetIntersect
+
+except :: ( SqlSelect a r
+          , SqlSelect b r
+          , MonadIO m
+          )
+       => SqlQuery a -> SqlQuery b -> SqlReadT m [r]
+except = doSetOperation SqlSetExcept
 	
 
 -- | (Internal) Run a 'C.Source' of rows.

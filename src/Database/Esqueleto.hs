@@ -84,6 +84,8 @@ module Database.Esqueleto
   , SqlEntity
   , select
   , selectSource
+  , union
+  , unionSource
   , delete
   , deleteCount
   , update

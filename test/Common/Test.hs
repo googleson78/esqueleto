@@ -58,7 +58,7 @@ module Common.Test
     ) where
 
 import Data.Either
-import Control.Monad (forM_, replicateM, replicateM_, void)
+import Control.Monad (forM, forM_, replicateM, replicateM_, void)
 import Control.Monad.Reader (ask)
 import Control.Monad.Catch (MonadCatch)
 #if __GLASGOW_HASKELL__ >= 806
@@ -304,6 +304,36 @@ testSelect run = do
       run $ do
         ret <- select $ return nothing
         liftIO $ ret `shouldBe` [ Value (Nothing :: Maybe Int) ]
+
+testUnion :: Run -> Spec
+testUnion run = do
+  describe "union" $
+    it "works" $ 
+      run $ do
+        let
+          names =
+            [ "john", "joe", "jordan", "james" ]
+          blogs =
+            [ "asdf", "qwer", "berty", "nopex" ]
+        (pid:_) <- forM names $ \name ->
+          insert (Person name Nothing Nothing 3)
+
+        forM_ blogs $ \blog ->
+          insert (BlogPost blog pid)
+
+        res <-
+          ( from $ \person -> do
+            pure (person ^. PersonName)
+          )
+          `union`
+          ( from $ \blog -> do
+            pure (blog ^. BlogPostTitle)
+          )
+
+        liftIO $
+          L.sort (map unValue res)
+            `shouldBe`
+              L.sort (names <> blogs)
 
 testSubSelect :: Run -> Spec
 testSubSelect run = do
@@ -2252,6 +2282,7 @@ tests :: Run -> Spec
 tests run = do
   describe "Tests that are common to all backends" $ do
     testSelect run
+    testUnion run
     testSubSelect run
     testSelectSource run
     testSelectFrom run

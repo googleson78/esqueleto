@@ -32,7 +32,8 @@ module Database.Esqueleto.Internal.Sql
   , SqlEntity
   , select
   , selectSource 
-  , union 
+  , union  
+  , unionSource
   , delete
   , deleteCount
   , update
