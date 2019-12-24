@@ -132,16 +132,78 @@ fromFinish (EPreprocessedFrom ret f') = Q $ do
 innerJoinQuery :: (ToAlias a a', SqlSelect a' r, ToAliasReference a' b) 
                => SqlQuery a 
                -> SqlQuery b
-innerJoinQuery subquery = do
+innerJoinQuery = joinQuery InnerJoinKind
+
+leftOuterJoinQuery :: (ToAlias a a', SqlSelect a' r, ToAliasReference a' b, ToMaybeExpr b b') 
+                   => SqlQuery a 
+                   -> SqlQuery b'
+leftOuterJoinQuery = (fmap toMaybeExpr) . joinQuery LeftOuterJoinKind
+
+rightOuterJoinQuery :: (ToAlias a a', SqlSelect a' r, ToAliasReference a' b, ToMaybeExpr b b')                                       => SqlQuery a 
+                    -> SqlQuery b'
+rightOuterJoinQuery = (fmap toMaybeExpr) . joinQuery RightOuterJoinKind
+
+fullOuterJoinQuery :: (ToAlias a a', SqlSelect a' r, ToAliasReference a' b, ToMaybeExpr b b') 
+                   => SqlQuery a 
+                   -> SqlQuery b'
+fullOuterJoinQuery = (fmap toMaybeExpr) . joinQuery FullOuterJoinKind
+
+crossJoinQuery :: (ToAlias a a', SqlSelect a' r, ToAliasReference a' b) 
+               => SqlQuery a 
+               -> SqlQuery b
+crossJoinQuery = joinQuery FullOuterJoinKind
+
+joinQuery :: (ToAlias a a', SqlSelect a' r, ToAliasReference a' b) 
+          => JoinKind 
+          -> SqlQuery a 
+          -> SqlQuery b
+joinQuery joinKind subquery = do
     (ret, sideData) <- Q $ W.censor (\_ -> mempty) $ W.listen $ unQ subquery
     aliasedValue <- toAlias ret
     let aliasedQuery = Q $ W.WriterT $ pure (aliasedValue, sideData)
     subqueryAlias <- newIdentFor (DBName "subquery")
     let fromClause = FromQuery subqueryAlias (\info -> toRawSql SELECT info aliasedQuery)
-    Q $ W.tell mempty {sdFromClause = FromJoinPartial InnerJoinKind fromClause}
+    Q $ W.tell mempty {sdFromClause = FromJoinPartial joinKind fromClause}
     toAliasReference subqueryAlias aliasedValue
 
+class ToMaybeExpr a b | a -> b where
+  toMaybeExpr :: a -> b
+        
+instance ToMaybeExpr (SqlExpr a) (SqlExpr (Maybe a)) where
+  toMaybeExpr e = EMaybe e
 
+instance ( ToMaybeExpr a a', ToMaybeExpr b b') => ToMaybeExpr (a,b) (a',b') where
+  toMaybeExpr (a,b) = (toMaybeExpr a, toMaybeExpr b)
+
+instance ( ToMaybeExpr a a'
+         , ToMaybeExpr b b'
+         , ToMaybeExpr c c'
+         ) => ToMaybeExpr (a,b,c) (a',b',c') where
+  toMaybeExpr (a,b,c) = (toMaybeExpr a, toMaybeExpr b, toMaybeExpr c)
+
+instance ( ToMaybeExpr a a'
+         , ToMaybeExpr b b'
+         , ToMaybeExpr c c'
+         , ToMaybeExpr d d'
+         ) => ToMaybeExpr (a,b,c,d) (a',b',c',d') where
+  toMaybeExpr (a,b,c,d) = ( toMaybeExpr a
+                          , toMaybeExpr b
+                          , toMaybeExpr c
+                          , toMaybeExpr d
+                          )
+
+instance ( ToMaybeExpr a a'
+         , ToMaybeExpr b b'
+         , ToMaybeExpr c c'
+         , ToMaybeExpr d d'
+         , ToMaybeExpr e e'
+         ) => ToMaybeExpr (a,b,c,d,e) (a',b',c',d',e') where
+  toMaybeExpr (a,b,c,d,e) = ( toMaybeExpr a
+                            , toMaybeExpr b
+                            , toMaybeExpr c
+                            , toMaybeExpr d
+                            , toMaybeExpr e
+                            )
 fromQuery
   :: (SqlSelect a' r, SqlSelect b' r', ToAlias a a', ToAliasReference b b')
   => SqlQuery a
@@ -161,7 +223,7 @@ fromQuery subquery f = do
     -- create aliased references from the outer query results (e.g value from subquery will be `subquery`.`value`), 
     -- this is probably overkill as the aliases should already be unique but seems to be good practice.
     toAliasReference subqueryAlias outerQueryResults
-        
+
 -- Tedious tuple magic
 class ToAlias a b | a -> b where
   toAlias :: a -> SqlQuery b
@@ -1766,14 +1828,14 @@ getFromClauseList f             = [f]
 instance Semigroup FromClause where
   FromNone <> f = f
   f <> FromNone = f
-  lhs@(FromJoin _ _ _ _) <> FromJoinPartial joinKind fromClause  = FromJoin lhs joinKind fromClause Nothing
-  lhs@(FromStart _ _)    <> FromJoinPartial joinKind fromClause  = FromJoin lhs joinKind fromClause Nothing
-  lhs@(FromQuery _ _)    <> FromJoinPartial joinKind fromClause  = FromJoin lhs joinKind fromClause Nothing
-  f <> FromMany (f'@(FromJoinPartial _ _):fs) = FromMany ((f <> f') : fs)
-  FromMany fs                         <> FromMany gs             = FromMany (fs <> gs)
-  f                                   <> FromMany fs             = FromMany (f:fs)
-  FromMany fs                         <> f                       = FromMany (fs ++ [f])
-  f                                   <> f'                      = FromMany [f, f']
+  lhs@(FromJoin _ _ _ _) <> FromJoinPartial joinKind fromClause    = FromJoin lhs joinKind fromClause Nothing
+  lhs@(FromStart _ _)    <> FromJoinPartial joinKind fromClause    = FromJoin lhs joinKind fromClause Nothing
+  lhs@(FromQuery _ _)    <> FromJoinPartial joinKind fromClause    = FromJoin lhs joinKind fromClause Nothing
+  f                      <> FromMany (f'@(FromJoinPartial _ _):fs) = FromMany ((f <> f') : fs)
+  FromMany fs                         <> FromMany gs               = FromMany (fs <> gs)
+  f                                   <> FromMany fs               = FromMany (f:fs)
+  FromMany fs                         <> f                         = FromMany (fs ++ [f])
+  f                                   <> f'                        = FromMany [f, f']
 
 instance Monoid FromClause where
   mempty = FromNone

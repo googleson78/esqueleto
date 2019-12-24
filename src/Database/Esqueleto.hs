@@ -66,6 +66,10 @@ module Database.Esqueleto
   , from
   , fromQuery
   , innerJoinQuery
+  , leftOuterJoinQuery
+  , rightOuterJoinQuery
+  , fullOuterJoinQuery
+  , crossJoinQuery
   , Value(..)
   , ValueList(..)
   , toAlias

@@ -846,7 +846,7 @@ testSelectSubQuery run = do
   describe "select subquery" $ do
     it "works" $ do
       run $ do
-        p1e <- insert' p1
+        _ <- insert' p1
         let q = from $ \p -> do
                   return ( p ^. PersonName, p ^. PersonAge)
         ret <- select $ fromQuery q pure       
@@ -883,6 +883,27 @@ testSelectSubQuery run = do
         (ret :: [(Value (Key Lord), Value Int)]) <- select q'
         liftIO $ ret `shouldMatchList` [ (Value l3k, Value 7)
                                        , (Value l1k, Value 3) ]
+
+    it "supports LEFT OUTER JOIN" $ do
+      run $ do
+        p1e <- insert' p1
+        p2e <- insert' p2
+        p3e <- insert' p3
+        p4e <- insert' p4
+        b12e <- insert' $ BlogPost "b" (entityKey p1e)
+        b11e <- insert' $ BlogPost "a" (entityKey p1e)
+        b31e <- insert' $ BlogPost "c" (entityKey p3e)
+        let q = from $ \p -> do
+                 mb <- leftOuterJoinQuery $ from $ \(mb_ :: SqlExpr (Entity BlogPost)) -> pure mb_ -- dummy subquery that just returns all the values in BlogPost table
+                 on (just (p ^. PersonId) ==. mb ?. BlogPostAuthorId)
+                 orderBy [ asc (p ^. PersonName), asc (mb ?. BlogPostTitle) ]
+                 return (p, mb)
+        ret <- select q
+        liftIO $ ret `shouldBe` [ (p1e, Just b11e)
+                                , (p1e, Just b12e)
+                                , (p4e, Nothing)
+                                , (p3e, Just b31e)
+                                , (p2e, Nothing) ]
 
 testSelectWhere :: Run -> Spec
 testSelectWhere run = do
@@ -1793,6 +1814,8 @@ testRenderSql run = do
     let
       render :: SqlExpr (Entity val) -> Text.Text
       render (EI.EEntity (EI.I ident)) = ident
+      render (EI.EAliasedEntity _ _) = undefined -- not used
+      render (EI.EAliasedEntityReference _ _) = undefined -- not used
     it "renders sensibly" $ do
       results <- run $ do
         _ <- insert $ Foo 2

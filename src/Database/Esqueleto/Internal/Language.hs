@@ -16,6 +16,10 @@ module Database.Esqueleto.Internal.Language
     from
   , fromQuery
   , innerJoinQuery
+  , leftOuterJoinQuery
+  , rightOuterJoinQuery
+  , fullOuterJoinQuery
+  , crossJoinQuery
   , Value(..)
   , ValueList(..)
   , SomeValue(..)
