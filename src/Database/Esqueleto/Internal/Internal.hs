@@ -126,8 +126,21 @@ fromFinish
   :: SqlExpr (PreprocessedFrom a)
   -> SqlQuery a
 fromFinish (EPreprocessedFrom ret f') = Q $ do
-  W.tell mempty { sdFromClause = [f'] }
+  W.tell mempty { sdFromClause = f' }
   return ret
+
+innerJoinQuery :: (ToAlias a a', SqlSelect a' r, ToAliasReference a' b) 
+               => SqlQuery a 
+               -> SqlQuery b
+innerJoinQuery subquery = do
+    (ret, sideData) <- Q $ W.censor (\_ -> mempty) $ W.listen $ unQ subquery
+    aliasedValue <- toAlias ret
+    let aliasedQuery = Q $ W.WriterT $ pure (aliasedValue, sideData)
+    subqueryAlias <- newIdentFor (DBName "subquery")
+    let fromClause = FromQuery subqueryAlias (\info -> toRawSql SELECT info aliasedQuery)
+    Q $ W.tell mempty {sdFromClause = FromJoinPartial InnerJoinKind fromClause}
+    toAliasReference subqueryAlias aliasedValue
+
 
 fromQuery
   :: (SqlSelect a' r, SqlSelect b' r', ToAlias a a', ToAliasReference b b')
@@ -142,7 +155,7 @@ fromQuery subquery f = do
     let aliasedQuery = Q $ W.WriterT $ pure (aliasedValue, sideData)
     -- Add the FromQuery that renders the subquery to our side data
     subqueryAlias <- newIdentFor (DBName "subquery")
-    Q $ W.tell mempty{sdFromClause = [FromQuery subqueryAlias (\info -> toRawSql SELECT info aliasedQuery)]}
+    Q $ W.tell mempty{sdFromClause = FromQuery subqueryAlias (\info -> toRawSql SELECT info aliasedQuery)}
     -- Pass the aliased results of the subquery to the outer query
     outerQueryResults <- f aliasedValue
     -- create aliased references from the outer query results (e.g value from subquery will be `subquery`.`value`), 
@@ -286,7 +299,7 @@ where_ expr = Q $ W.tell mempty { sdWhereClause = Where expr }
 --   ...
 -- @
 on :: SqlExpr (Value Bool) -> SqlQuery ()
-on expr = Q $ W.tell mempty { sdFromClause = [OnClause expr] }
+on expr = Q $ W.tell mempty { sdFromClause = OnClause expr }
 
 -- | @GROUP BY@ clause. You can enclose multiple columns
 -- in a tuple.
@@ -1699,7 +1712,7 @@ type SqlEntity ent = (PersistEntity ent, PersistEntityBackend ent ~ SqlBackend)
 
 -- | Side data written by 'SqlQuery'.
 data SideData = SideData { sdDistinctClause :: !DistinctClause
-                         , sdFromClause     :: ![FromClause]
+                         , sdFromClause     :: !FromClause
                          , sdSetClause      :: ![SetClause]
                          , sdWhereClause    :: !WhereClause
                          , sdGroupByClause  :: !GroupByClause
@@ -1737,15 +1750,44 @@ instance Monoid DistinctClause where
 data FromClause =
     FromStart Ident EntityDef
   | FromJoin FromClause JoinKind FromClause (Maybe (SqlExpr (Value Bool)))
+  | FromJoinPartial JoinKind FromClause
   | OnClause (SqlExpr (Value Bool))
   | FromQuery Ident (IdentInfo -> (TLB.Builder, [PersistValue]))
+  | FromMany [FromClause]
+  | FromNone
+
+
+-- Make the semigroup version of FromClause look like the old list version
+getFromClauseList :: FromClause -> [FromClause]
+getFromClauseList (FromMany fs) = fs
+getFromClauseList FromNone        = []
+getFromClauseList f             = [f]
+
+instance Semigroup FromClause where
+  FromNone <> f = f
+  f <> FromNone = f
+  lhs@(FromJoin _ _ _ _) <> FromJoinPartial joinKind fromClause  = FromJoin lhs joinKind fromClause Nothing
+  lhs@(FromStart _ _)    <> FromJoinPartial joinKind fromClause  = FromJoin lhs joinKind fromClause Nothing
+  lhs@(FromQuery _ _)    <> FromJoinPartial joinKind fromClause  = FromJoin lhs joinKind fromClause Nothing
+  f <> FromMany (f'@(FromJoinPartial _ _):fs) = FromMany ((f <> f') : fs)
+  FromMany fs                         <> FromMany gs             = FromMany (fs <> gs)
+  f                                   <> FromMany fs             = FromMany (f:fs)
+  FromMany fs                         <> f                       = FromMany (fs ++ [f])
+  f                                   <> f'                      = FromMany [f, f']
+
+instance Monoid FromClause where
+  mempty = FromNone
+  mappend = (<>)
 
 collectIdents :: FromClause -> Set Ident
 collectIdents fc = case fc of
   FromStart i _ -> Set.singleton i
   FromJoin lhs _ rhs _ -> collectIdents lhs <> collectIdents rhs
   OnClause _ -> mempty
-  FromQuery _ _ -> mempty
+  FromQuery i _ -> Set.singleton i
+  FromJoinPartial _ _ -> mempty
+  FromMany _ -> mempty
+  FromNone -> mempty
 
 instance Show FromClause where
   show fc = case fc of
@@ -1769,7 +1811,12 @@ instance Show FromClause where
       "(OnClause " <> render' expr <> ")"
     FromQuery ident _->
       "(FromQuery " <> show ident <> ")"
-
+    FromMany fs ->
+      "(FromMany " <> show fs <> ")"
+    FromNone ->
+      "(FromNone)"
+    FromJoinPartial jk f ->
+      "(FromJoinPartial " <> show jk <> " " <> show f <> ")"
 
     where
       dummy = SqlBackend
@@ -1790,9 +1837,11 @@ collectOnClauses
   -> [FromClause]
   -> Either (SqlExpr (Value Bool)) [FromClause]
 collectOnClauses sqlBackend = go Set.empty []
- --  . (\fc -> Debug.trace ("From Clauses: " <> show fc) fc)
+  -- . (\fc -> Debug.trace ("From Clauses: " <> show fc) fc)
   where
     go is []  (f@(FromStart i _) : fs) =
+      fmap (f:) (go (Set.insert i is) [] fs) -- fast path
+    go is []  (f@(FromQuery i _) : fs) =
       fmap (f:) (go (Set.insert i is) [] fs) -- fast path
     go idents acc (OnClause expr : fs) = do
       (idents', a) <- findMatching idents acc expr
@@ -1825,14 +1874,20 @@ collectOnClauses sqlBackend = go Set.empty []
           Left expr
 
     findRightmostIdent (FromStart i _) = Just i
+    findRightmostIdent (FromQuery i _) = Just i
     findRightmostIdent (FromJoin _ _ r _) = findRightmostIdent r
+    findRightmostIdent (FromJoinPartial _ _ ) = fail "wtf"
     findRightmostIdent (OnClause {}) = Nothing
-    findRightmostIdent (FromQuery _ _) = Nothing
+    findRightmostIdent (FromNone) = Nothing
+    findRightmostIdent (FromMany _) = Nothing
 
     findLeftmostIdent (FromStart i _) = Just i
+    findLeftmostIdent (FromQuery i _) = Just i
     findLeftmostIdent (FromJoin l _ _ _) = findLeftmostIdent l
+    findLeftmostIdent (FromJoinPartial _ _ ) = fail "wtf"
     findLeftmostIdent (OnClause {}) = Nothing
-    findLeftmostIdent (FromQuery _ _) = Nothing
+    findLeftmostIdent (FromNone) = Nothing
+    findLeftmostIdent (FromMany _) = Nothing
 
     tryMatch
       :: Set Ident
@@ -2631,7 +2686,7 @@ toRawSql mode (conn, firstIdentState) query =
         W.runWriterT $
         unQ query
       SideData distinctClause
-               fromClauses
+               fromClause
                setClauses
                whereClauses
                groupByClause
@@ -2647,7 +2702,7 @@ toRawSql mode (conn, firstIdentState) query =
   in mconcat
       [ makeInsertInto info mode ret
       , makeSelect     info mode distinctClause ret
-      , makeFrom       info mode fromClauses
+      , makeFrom       info mode (getFromClauseList fromClause)
       , makeSet        info setClauses
       , makeWhere      info whereClauses
       , makeGroupBy    info groupByClause
@@ -2808,10 +2863,14 @@ makeFrom info mode fs = ret
               , mk Parens rhs
               , maybe mempty makeOnClause monClause
               ]
-    mk _ (OnClause _) = throw (UnexpectedCaseErr MakeFromError)
     mk _ (FromQuery ident f) = 
       let (queryText, queryVals) = f info
       in ((parens queryText) <> " AS " <> useIdent info ident, queryVals)
+
+    mk _ (OnClause _)          = throw (UnexpectedCaseErr MakeFromError)
+    mk _ (FromNone  )          = throw (UnexpectedCaseErr MakeFromError)
+    mk _ (FromMany _)          = throw (UnexpectedCaseErr MakeFromError)
+    mk _ (FromJoinPartial _ _) = throw (UnexpectedCaseErr MakeFromError)
 
     base ident@(I identText) def =
       let db@(DBName dbText) = entityDB def

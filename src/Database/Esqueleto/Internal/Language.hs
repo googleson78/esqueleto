@@ -15,6 +15,7 @@ module Database.Esqueleto.Internal.Language
   ( -- * The pretty face
     from
   , fromQuery
+  , innerJoinQuery
   , Value(..)
   , ValueList(..)
   , SomeValue(..)

@@ -874,10 +874,13 @@ testSelectSubQuery run = do
                 on $ lord ^. LordId ==. deed ^. DeedOwnerId
                 return (lord ^. LordId, deed ^. DeedId)
 
-        (ret :: [(Value (Key Lord), Value Int)]) <- select $ fromQuery q $ \(lordId,deedId) -> do
+            q' = from $ \lords -> do
+                 (lordId, deedId) <- innerJoinQuery q
+                 on (lordId ==. lords ^. LordId)
                  groupBy (lordId)
                  return (lordId, count deedId)
 
+        (ret :: [(Value (Key Lord), Value Int)]) <- select q'
         liftIO $ ret `shouldMatchList` [ (Value l3k, Value 7)
                                        , (Value l1k, Value 3) ]
 

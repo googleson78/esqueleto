@@ -65,6 +65,7 @@ module Database.Esqueleto
   , else_
   , from
   , fromQuery
+  , innerJoinQuery
   , Value(..)
   , ValueList(..)
   , toAlias
