@@ -20,6 +20,7 @@ module Database.Esqueleto.Internal.Language
   , rightOuterJoinQuery
   , fullOuterJoinQuery
   , crossJoinQuery
+  , fromSetOperation
   , Value(..)
   , ValueList(..)
   , SomeValue(..)
@@ -45,6 +46,7 @@ module Database.Esqueleto.Internal.Language
   , PreprocessedFrom
   , From
   , FromPreprocess
+  , SqlSetOperation(..)
   , when_
   , then_
   , else_

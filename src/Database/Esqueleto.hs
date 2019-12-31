@@ -70,6 +70,7 @@ module Database.Esqueleto
   , rightOuterJoinQuery
   , fullOuterJoinQuery
   , crossJoinQuery
+  , fromSetOperation
   , Value(..)
   , ValueList(..)
   , toAlias
@@ -84,6 +85,7 @@ module Database.Esqueleto
   , RightOuterJoin(..)
   , FullOuterJoin(..)
   , OnClauseWithoutMatchingJoinException(..)
+  , SqlSetOperation(..)
 
     -- * SQL backend
   , SqlQuery
