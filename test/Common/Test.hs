@@ -905,6 +905,47 @@ testSelectSubQuery run = do
                                 , (p3e, Just b31e)
                                 , (p2e, Nothing) ]
 
+    it "supports joining two queries" $ do
+      run $ do
+        p1e <- insert' p1
+        p2e <- insert' p2
+        p3e <- insert' p3
+        p4e <- insert' p4
+        b12e <- insert' $ BlogPost "b" (entityKey p1e)
+        b11e <- insert' $ BlogPost "a" (entityKey p1e)
+        b31e <- insert' $ BlogPost "c" (entityKey p3e)
+        let q = from $ \p -> do
+                 mb <- leftOuterJoinQuery $ from $ \(mb_ :: SqlExpr (Entity BlogPost)) -> pure mb_ -- dummy subquery that just returns all the values in BlogPost table
+                 mb' <- leftOuterJoinQuery $ from $ \(mb_ :: SqlExpr (Entity BlogPost)) -> pure mb_ -- dummy subquery that just returns all the values in BlogPost table
+                 on (just (p ^. PersonId) ==. mb ?. BlogPostAuthorId)
+                 on (just (p ^. PersonId) ==. mb' ?. BlogPostAuthorId)
+                 orderBy [ asc (p ^. PersonName), asc (mb ?. BlogPostTitle) ]
+                 return (p, mb, mb')
+        ret <- select q
+        liftIO $ ret `shouldBe` [ (p1e, Just b11e, Just b11e)
+                                , (p1e, Just b12e, Just b12e)
+                                , (p4e, Nothing, Nothing)
+                                , (p3e, Just b31e, Just b31e)
+                                , (p2e, Nothing, Nothing) ]
+
+    it "Can count results of aggregate query" $ do
+      run $ do
+        l1k <- insert l1
+        l3k <- insert l3
+        mapM_ (\k -> insert $ Deed k l1k) (map show [1..3 :: Int])
+
+        mapM_ (\k -> insert $ Deed k l3k) (map show [4..10 :: Int])
+        let q = from $ \( lord `InnerJoin` deed ) -> do
+                on $ lord ^. LordId ==. deed ^. DeedOwnerId
+                groupBy (lord ^. LordId)
+                return (lord ^. LordId, count (deed ^. DeedId))
+
+        (ret :: [(Value Int)]) <- select $ fromQuery q $ \(lordId, deedCount) -> do
+                 where_ $ deedCount >. val (3 :: Int) 
+                 return (count lordId)
+
+        liftIO $ ret `shouldMatchList` [ (Value 1) ]
+
 testSelectWhere :: Run -> Spec
 testSelectWhere run = do
   describe "select where_" $ do
