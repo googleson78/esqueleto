@@ -1813,6 +1813,7 @@ data FromClause =
     FromStart Ident EntityDef
   | FromJoin FromClause JoinKind FromClause (Maybe (SqlExpr (Value Bool)))
   | FromJoinPartial JoinKind FromClause
+  | FromJoinPartials [FromClause]
   | OnClause (SqlExpr (Value Bool))
   | FromQuery Ident (IdentInfo -> (TLB.Builder, [PersistValue]))
   | FromMany [FromClause]
@@ -1828,14 +1829,18 @@ getFromClauseList f             = [f]
 instance Semigroup FromClause where
   FromNone <> f = f
   f <> FromNone = f
-  lhs@(FromJoin _ _ _ _) <> FromJoinPartial joinKind fromClause    = FromJoin lhs joinKind fromClause Nothing
-  lhs@(FromStart _ _)    <> FromJoinPartial joinKind fromClause    = FromJoin lhs joinKind fromClause Nothing
-  lhs@(FromQuery _ _)    <> FromJoinPartial joinKind fromClause    = FromJoin lhs joinKind fromClause Nothing
-  f                      <> FromMany (f'@(FromJoinPartial _ _):fs) = FromMany ((f <> f') : fs)
-  FromMany fs                         <> FromMany gs               = FromMany (fs <> gs)
-  f                                   <> FromMany fs               = FromMany (f:fs)
-  FromMany fs                         <> f                         = FromMany (fs ++ [f])
-  f                                   <> f'                        = FromMany [f, f']
+  lhs@(FromJoin _ _ _ _)  <> FromJoinPartial joinKind fromClause    = FromJoin lhs joinKind fromClause Nothing
+  lhs@(FromStart _ _)     <> FromJoinPartial joinKind fromClause    = FromJoin lhs joinKind fromClause Nothing
+  lhs@(FromQuery _ _)     <> FromJoinPartial joinKind fromClause    = FromJoin lhs joinKind fromClause Nothing
+  p@(FromJoinPartial _ _) <> p'@(FromJoinPartial _ _)               = FromJoinPartials [p, p']
+  p@(FromJoinPartial _ _) <> FromJoinPartials partials              = FromJoinPartials (p:partials)
+  f                       <> FromJoinPartials partials              = foldl (<>) f partials
+  f                       <> FromMany (f'@(FromJoinPartials _ ):fs) = FromMany ((f <> f') : fs)
+  f                       <> FromMany (f'@(FromJoinPartial _ _):fs) = FromMany ((f <> f') : fs)
+  FromMany fs             <> FromMany gs                            = FromMany (fs <> gs)
+  f                       <> FromMany fs                            = FromMany (f:fs)
+  FromMany fs             <> f                                      = FromMany (fs ++ [f])
+  f                       <> f'                                     = FromMany [f, f']
 
 instance Monoid FromClause where
   mempty = FromNone

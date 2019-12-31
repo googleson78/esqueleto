@@ -909,11 +909,8 @@ testSelectSubQuery run = do
       run $ do
         p1e <- insert' p1
         p2e <- insert' p2
-        p3e <- insert' p3
-        p4e <- insert' p4
         b12e <- insert' $ BlogPost "b" (entityKey p1e)
         b11e <- insert' $ BlogPost "a" (entityKey p1e)
-        b31e <- insert' $ BlogPost "c" (entityKey p3e)
         let q = from $ \p -> do
                  mb <- leftOuterJoinQuery $ from $ \(mb_ :: SqlExpr (Entity BlogPost)) -> pure mb_ -- dummy subquery that just returns all the values in BlogPost table
                  mb' <- leftOuterJoinQuery $ from $ \(mb_ :: SqlExpr (Entity BlogPost)) -> pure mb_ -- dummy subquery that just returns all the values in BlogPost table
@@ -923,9 +920,9 @@ testSelectSubQuery run = do
                  return (p, mb, mb')
         ret <- select q
         liftIO $ ret `shouldBe` [ (p1e, Just b11e, Just b11e)
+                                , (p1e, Just b11e, Just b12e)
+                                , (p1e, Just b12e, Just b11e)
                                 , (p1e, Just b12e, Just b12e)
-                                , (p4e, Nothing, Nothing)
-                                , (p3e, Just b31e, Just b31e)
                                 , (p2e, Nothing, Nothing) ]
 
     it "Can count results of aggregate query" $ do
