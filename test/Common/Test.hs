@@ -1024,6 +1024,29 @@ testSelectSubQuery run = do
           names <- select q
           liftIO $ names `shouldMatchList` [ (Value $ personName p1)
                                            , (Value $ personName p2) ]
+
+    it "supports limit in subqueries" $ do
+      run $ do
+        mapM_ (insert . Foo) [1..6]
+
+        let q1 = do
+              foo <- Experimental.from $ Table @Foo
+              where_ $ foo ^. FooName <=. val 3
+              orderBy [asc $ foo ^. FooName]
+              limit 2
+              pure $ foo ^. FooName
+
+        let q2 = do
+              foo <- Experimental.from $ Table @Foo
+              where_ $ foo ^. FooName >. val 3
+              orderBy [asc $ foo ^. FooName]
+              limit 2
+              pure $ foo ^. FooName
+
+
+        ret <- select $ Experimental.from $ SelectQuery q1 `Union` SelectQuery q2
+        liftIO $ ret `shouldMatchList` [Value 1, Value 2, Value 4, Value 5]
+
 testSelectWhere :: Run -> Spec
 testSelectWhere run = do
   describe "select where_" $ do

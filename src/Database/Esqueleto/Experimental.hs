@@ -68,6 +68,7 @@ import Database.Esqueleto.Internal.Internal
           , to3, to4, to5, to6, to7, to8
           , from3, from4, from5, from6, from7, from8
           , veryUnsafeCoerceSqlExprValue
+          , parens
           )
 import GHC.TypeLits
 
@@ -652,7 +653,7 @@ from parts = do
                   let
                     (q1, v1) = operationToSql o1 info
                     (q2, v2) = operationToSql o2 info
-                  in (q1 <> " " <> operationText <> " " <> q2, v1 <> v2)
+                  in (parens q1 <> " " <> operationText <> " " <> parens q2, v1 <> v2)
 
 
       runFrom (InnerJoinFrom leftPart (rightPart, on')) = do
